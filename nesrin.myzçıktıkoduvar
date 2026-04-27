@@ -1,0 +1,219 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "provenance": [],
+      "authorship_tag": "ABX9TyNoiTaxQtPt0mviXi8oFv/R",
+      "include_colab_link": true
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    }
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "view-in-github",
+        "colab_type": "text"
+      },
+      "source": [
+        "<a href=\"https://colab.research.google.com/github/nesrintekbas02-cmd/MYZ305E-EcoQuery-GeoAI/blob/main/nesrin.myz%C3%A7%C4%B1kt%C4%B1koduvar\" target=\"_parent\"><img src=\"https://colab.research.google.com/assets/colab-badge.svg\" alt=\"Open In Colab\"/></a>"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "0yiOsdfkCec9"
+      },
+      "outputs": [],
+      "source": [
+        "!pip install -q langchain langchain-openai earthengine-api geemap"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import ee\n",
+        "import geemap\n",
+        "\n",
+        "# GEE kimlik doğrulama ekranını açar\n",
+        "ee.Authenticate()"
+      ],
+      "metadata": {
+        "id": "F70swESpCvrJ"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "!pip install -q langchain-google-genai"
+      ],
+      "metadata": {
+        "id": "Av_iT0AfDowb"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import os\n",
+        "from getpass import getpass\n",
+        "\n",
+        "# API anahtarını güvenli bir şekilde girmek için bir kutucuk açar\n",
+        "print(\"Lütfen kopyaladığınız Gemini API anahtarınızı yapıştırın ve Enter'a basın:\")\n",
+        "os.environ[\"GEMINI_API_KEY\"] = getpass()"
+      ],
+      "metadata": {
+        "id": "pmJc4mW2Ea_Z"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "from langchain.tools import tool\n",
+        "from langchain_google_genai import ChatGoogleGenerativeAI\n",
+        "from langchain_classic.agents import AgentExecutor, create_tool_calling_agent\n",
+        "from langchain_core.prompts import ChatPromptTemplate\n",
+        "import ee\n",
+        "\n",
+        "# 1. Ajanın kullanacağı aracı (Tool) tanımlıyoruz\n",
+        "@tool\n",
+        "def landsat_bitki_ortusu_analizi(enlem: float, boylam: float, yil: int) -> str:\n",
+        "    \"\"\"Belirtilen koordinat (enlem, boylam) ve yıl için Landsat 8 uydu verilerini kullanarak\n",
+        "    yaz aylarındaki ortalama bitki örtüsü yoğunluğunu (NDVI) hesaplar.\"\"\"\n",
+        "    try:\n",
+        "        nokta = ee.Geometry.Point([boylam, enlem])\n",
+        "\n",
+        "        koleksiyon = (ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')\n",
+        "                      .filterBounds(nokta)\n",
+        "                      .filterDate(f'{yil}-06-01', f'{yil}-09-01')\n",
+        "                      .filterMetadata('CLOUD_COVER', 'less_than', 10))\n",
+        "\n",
+        "        resim = koleksiyon.median()\n",
+        "        ndvi = resim.normalizedDifference(['B5', 'B4'])\n",
+        "        deger = ndvi.reduceRegion(reducer=ee.Reducer.mean(), geometry=nokta, scale=30).get('nd').getInfo()\n",
+        "\n",
+        "        if deger is None:\n",
+        "            return \"Bu bölge ve tarih için uygun bulutsuz uydu görüntüsü bulunamadı.\"\n",
+        "\n",
+        "        return f\"Hesaplanan NDVI değeri: {round(deger, 3)}. (Not: 0.2 altı cansız/toprak, 0.2-0.5 zayıf bitki, 0.5 üstü sağlıklı bitki örtüsünü ifade eder.)\"\n",
+        "\n",
+        "    except Exception as e:\n",
+        "        return f\"Analiz sırasında bir hata oluştu: {str(e)}\"\n",
+        "\n",
+        "# 2. BURAYI DEĞİŞTİRDİK: En güncel model olan 2.5-flash'ı kullanıyoruz\n",
+        "llm = ChatGoogleGenerativeAI(model=\"gemini-2.5-flash\", temperature=0)\n",
+        "\n",
+        "# 3. Ajanın kişiliğini ve görevini tanımlıyoruz\n",
+        "prompt = ChatPromptTemplate.from_messages([\n",
+        "    (\"system\", \"Sen EcoQuery adında uzman bir GeoAI ajanısın. Görevin, sana verilen araçları kullanarak kullanıcının coğrafi sorularını yanıtlamaktır. Sonuçları her zaman Türkçe, profesyonel ve anlaşılır bir dille açıkla.\"),\n",
+        "    (\"human\", \"{input}\"),\n",
+        "    (\"placeholder\", \"{agent_scratchpad}\"),\n",
+        "])\n",
+        "\n",
+        "# 4. Ajanı inşa ediyoruz\n",
+        "araclar = [landsat_bitki_ortusu_analizi]\n",
+        "ajan = create_tool_calling_agent(llm, araclar, prompt)\n",
+        "eco_query_ajani = AgentExecutor(agent=ajan, tools=araclar, verbose=True)\n",
+        "\n",
+        "print(\"EcoQuery Ajanı (Gemini 2.5 Flash modeliyle) başarıyla oluşturuldu ve göreve hazır!\")"
+      ],
+      "metadata": {
+        "id": "8vEGOeK-G7RL"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# Ajanımıza sorumuzu soruyoruz\n",
+        "soru = \"Kahramanmaraş merkez (enlem: 37.57, boylam: 36.92) civarında 2023 yılı yaz aylarında bitki örtüsü nasıldı? Analiz eder misin?\"\n",
+        "\n",
+        "print(f\"Kullanıcı Sorusu: {soru}\\n\")\n",
+        "print(\"EcoQuery Düşünüyor ve Analiz Ediyor...\\n\")\n",
+        "print(\"-\" * 50)\n",
+        "\n",
+        "# Ajanı çalıştırıyoruz\n",
+        "yanit = eco_query_ajani.invoke({\"input\": soru})\n",
+        "\n",
+        "print(\"-\" * 50)\n",
+        "print(f\"\\nEcoQuery'nin Yanıtı:\\n{yanit['output']}\")"
+      ],
+      "metadata": {
+        "id": "vP0pk_qBHzmM"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import ee\n",
+        "ee.Initialize(project='kanaryalar')"
+      ],
+      "metadata": {
+        "id": "F-HzgWHoH2As"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import geemap\n",
+        "\n",
+        "# 1. İnteraktif haritayı oluştur ve Kahramanmaraş'a odakla\n",
+        "harita = geemap.Map(center=[37.57, 36.92], zoom=11)\n",
+        "\n",
+        "# 2. Ajanımızın kullandığı aynı Landsat 8 verisini çek\n",
+        "nokta = ee.Geometry.Point([36.92, 37.57])\n",
+        "koleksiyon = (ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')\n",
+        "              .filterBounds(nokta)\n",
+        "              .filterDate('2023-06-01', '2023-09-01')\n",
+        "              .filterMetadata('CLOUD_COVER', 'less_than', 10))\n",
+        "\n",
+        "resim = koleksiyon.median()\n",
+        "ndvi = resim.normalizedDifference(['B5', 'B4'])\n",
+        "\n",
+        "# 3. Görselleştirme (Renk) parametrelerini ayarla\n",
+        "# Cansız alanlar beyaz/sarı, bitki örtüsü yeşil tonlarında görünecek\n",
+        "ndvi_renkleri = {\n",
+        "    'min': 0.0,\n",
+        "    'max': 0.6,\n",
+        "    'palette': ['#ece7f2', '#d0d1e6', '#a6bddb', '#74a9cf', '#3690c0', '#0570b0', '#034e7b', '#238b45', '#00441b']\n",
+        "}\n",
+        "\n",
+        "# 4. Katmanları haritaya ekle\n",
+        "# Sadece Kahramanmaraş merkez etrafında 20km'lik bir alanı kesiyoruz (clip) ki harita çok ağırlaşmasın\n",
+        "analiz_alani = nokta.buffer(20000)\n",
+        "\n",
+        "# Önce gerçek renkli (RGB) uydu görüntüsünü altlık olarak ekliyoruz\n",
+        "harita.addLayer(resim.clip(analiz_alani), {'bands': ['B4', 'B3', 'B2'], 'min': 0, 'max': 0.3}, 'Landsat 8 (Gerçek Renk)')\n",
+        "\n",
+        "# Üstüne NDVI analizimizi ekliyoruz\n",
+        "harita.addLayer(ndvi.clip(analiz_alani), ndvi_renkleri, 'NDVI Analizi')\n",
+        "\n",
+        "# 5. Haritayı ekranda göster\n",
+        "harita"
+      ],
+      "metadata": {
+        "id": "pXE3wfQKTn-g"
+      },
+      "execution_count": null,
+      "outputs": []
+    }
+  ]
+}
